@@ -2,163 +2,155 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
+// Broches ESP32 (modifiable selon ton câblage)
+#define INTERRUPT_PIN1 13  // GPIO13
+#define INTERRUPT_PIN2 12  // GPIO12
+#define RPWM 15            // GPIO15
+#define LPWM 14            // GPIO14
+#define BUTTON 0           // GPIO0
 
+// PWM channels
+#define RPWM_CHANNEL 0
+#define LPWM_CHANNEL 1
 
-#define INTERRUPT_PIN1 D7  // Broche D7 (GPIO13)
-#define INTERRUPT_PIN2 D6  // Broche D6 (GPIO12)
-
-#define RPWM D8  // Broche 8 (GPIO15)
-#define LPWM D3  // Broche 5 (GPIO14)
-
-#define button D5  //bouton start stop, broche D3 (GPIO0)
-
-int count1 = 0;  // Compteur de passages capteur 1
-int count2 = 0;  // Compteur de passages capteur 2
+int count1 = 0;
+int count2 = 0;
 unsigned long previousMillis;
 unsigned long currentMillis;
 int RPM1 = 0;
 int RPM2 = 0;
 
-const int V_MAX = 120; // en km/h
+const int V_MAX = 120; // km/h
 int V_input = 0;
 
-const int MAX_RPM = 3350; 
+const int MAX_RPM = 3350;
 int rpm_input = 0;
-
 int pwm_value = 0;
 
-bool motorState = false; // flag pour l'état du moteur
+volatile bool motorState = false;
+volatile bool motorToggleRequested = false;
 
-LiquidCrystal_I2C lcd(0x27,16,2);  // set the LCD address to 0x27(Cooperate with 3 short circuit caps) for a 16 chars and 2 line display
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-void ICACHE_RAM_ATTR countPassage1() {
-  count1=count1+1;
+void IRAM_ATTR countPassage1() {
+  count1++;
 }
 
-void ICACHE_RAM_ATTR countPassage2() {
-  count2=count2+1;
+void IRAM_ATTR countPassage2() {
+  count2++;
 }
 
-void ICACHE_RAM_ATTR toggleMotor() {
-    motorState = !motorState;
-    if (motorState == true) {
-      Serial.println("démarrage moteur");
-      lcd.clear();
-      lcd.setCursor(0,0); // positionne le curseur à la colonne 1 et à la ligne 1  
-      lcd.print("Demarrage moteur");
-    }
-    else {
-      Serial.println("arret moteur");
-      lcd.clear();
-      lcd.setCursor(0,0); // positionne le curseur à la colonne 1 et à la ligne 1  
-      lcd.print("Arret moteur");
-    }
-    delay(2000);
-    lcd.clear();
+void IRAM_ATTR toggleMotor() {
+  motorToggleRequested = true;
 }
 
 //+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   delay(1000);
-  analogWriteFreq(25000); //ajustement de la fréquence de PWM pour éviter du bruit audible
+
+  // PWM setup
+  ledcSetup(RPWM_CHANNEL, 25000, 8); // 25kHz, 8-bit resolution
+  ledcAttachPin(RPWM, RPWM_CHANNEL);
+  ledcSetup(LPWM_CHANNEL, 25000, 8);
+  ledcAttachPin(LPWM, LPWM_CHANNEL);
+
   pinMode(INTERRUPT_PIN1, INPUT_PULLUP);
   pinMode(INTERRUPT_PIN2, INPUT_PULLUP);
-  pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(RPWM, OUTPUT);
-  pinMode(LPWM, OUTPUT);
-  pinMode(button, INPUT_PULLUP);
- 
-  motorState = false;
-  
+  pinMode(BUTTON, INPUT_PULLUP);
+
   previousMillis = millis();
-  
-  attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN1), countPassage1, RISING);
-  attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN2), countPassage2, RISING);
-  attachInterrupt(digitalPinToInterrupt(button), toggleMotor, FALLING);
-  
-  digitalWrite(LED_BUILTIN, LOW);     // turn the LED on (HIGH is the voltage level)
-  delay(5000);                        // wait for 5 seconds
-  digitalWrite(LED_BUILTIN, HIGH);    // turn the LED off by making the voltage LOW
-  delay(200);
-  digitalWrite(LED_BUILTIN, LOW);
-  delay(200);
-  digitalWrite(LED_BUILTIN, HIGH);
-  
-  lcd.init();       //setup affichage lcd
-  lcd.backlight();  //setup affichage lcd
+
+  attachInterrupt(INTERRUPT_PIN1, countPassage1, RISING);
+  attachInterrupt(INTERRUPT_PIN2, countPassage2, RISING);
+  attachInterrupt(BUTTON, toggleMotor, FALLING);
+
+  lcd.init();
+  lcd.backlight();
 
   delay(2000);
 
-  Serial.println("Consigne de vitesse: ");
-  Serial.println("motorState ");
-  Serial.println(motorState);
-
+  Serial.println("Système prêt.");
 }
 
-//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 void loop() {
-  if (Serial.available() >0) {
+  // Gestion du bouton via interruption
+  if (motorToggleRequested) {
+    motorToggleRequested = false;
+    motorState = !motorState;
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    if (motorState) {
+      Serial.println("Démarrage moteur");
+      lcd.print("Demarrage moteur");
+    } else {
+      Serial.println("Arrêt moteur");
+      lcd.print("Arret moteur");
+    }
+    delay(2000);
+    lcd.clear();
+  }
+
+  // Lecture de la consigne via Serial
+  if (Serial.available() > 0) {
     V_input = Serial.parseInt();
     V_input = constrain(V_input, 0, V_MAX);
 
-    rpm_input = (V_input*1000/60)/(0.254*3.14159);
-    
-    //rpm_input = Serial.parseInt();
-    //rpm_input = constrain(rpm_input, 0, MAX_RPM);
+    rpm_input = (V_input * 1000 / 60) / (0.254 * 3.14159);
     pwm_value = map(rpm_input, 0, MAX_RPM, 0, 255);
 
-    //analogWrite(RPWM, pwm_value);
-    //analogWrite(LPWM, 0);
-
+    Serial.print("Consigne: ");
     Serial.print(V_input);
     Serial.println(" km/h");
-    Serial.print(rpm_input);
-    Serial.println(" tr/min");
-    Serial.print("Valeur de PWM: ");
+    Serial.print("RPM cible: ");
+    Serial.println(rpm_input);
+    Serial.print("PWM: ");
     Serial.println(pwm_value);
   }
 
+  // Calcul des RPM toutes les 2 secondes
   currentMillis = millis();
-    
-  if (currentMillis - previousMillis >= 2000) { // toutes les 2 secondes
-    detachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN1));
-    detachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN2));
-    // Calcul du régime en tours par minute
-    RPM1 = (count1 * 30.0); // car count sur 2 secondes, à modifier si intervalle différent
-    RPM2 = (count2 * 30.0); // car count sur 2 secondes, à modifier si intervalle différent
-    count1 = 0; // réinitialiser le compteur
-    count2 = 0; // réinitialiser le compteur
+  if (currentMillis - previousMillis >= 2000) {
+    detachInterrupt(INTERRUPT_PIN1);
+    detachInterrupt(INTERRUPT_PIN2);
+
+    RPM1 = count1 * 30;
+    RPM2 = count2 * 30;
+    count1 = 0;
+    count2 = 0;
     previousMillis = currentMillis;
-    attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN1), countPassage1, RISING);
-    attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN2), countPassage2, RISING);
-    
+
+    attachInterrupt(INTERRUPT_PIN1, countPassage1, RISING);
+    attachInterrupt(INTERRUPT_PIN2, countPassage2, RISING);
+
     lcd.clear();
-    lcd.setCursor(0,0); // positionne le curseur à la colonne 1 et à la ligne 1  
-    lcd.print("Vmot1   ");
-    lcd.setCursor(8,0); // positionne le curseur à la colonne 8 et à la ligne 1 
+    lcd.setCursor(0, 0);
+    lcd.print("Vmot1 ");
+    lcd.setCursor(8, 0);
     lcd.print(RPM1);
-    lcd.setCursor(13,0); // positionne le curseur à la colonne 13 et à la ligne 1
+    lcd.setCursor(13, 0);
     lcd.print("rpm");
-    lcd.setCursor(0,1); // positionne le curseur à la colonne 1 et à la ligne 2  
-    lcd.print("Vmot2   ");
-    lcd.setCursor(8,1); // positionne le curseur à la colonne 8 et à la ligne 2 
+
+    lcd.setCursor(0, 1);
+    lcd.print("Vmot2 ");
+    lcd.setCursor(8, 1);
     lcd.print(RPM2);
-    lcd.setCursor(13,1); // positionne le curseur à la colonne 13 et à la ligne 2
+    lcd.setCursor(13, 1);
     lcd.print("rpm");
-    
   }
-  
-  if (motorState == true) {
-      analogWrite(RPWM, pwm_value);
-      analogWrite(LPWM, 0);
-  }
-  else {
-      analogWrite(RPWM, 0);
-      analogWrite(LPWM, 0);
+
+  // Commande du moteur
+  if (motorState) {
+    ledcWrite(RPWM_CHANNEL, pwm_value);
+    ledcWrite(LPWM_CHANNEL, 0);
+  } else {
+    ledcWrite(RPWM_CHANNEL, 0);
+    ledcWrite(LPWM_CHANNEL, 0);
   }
 }
